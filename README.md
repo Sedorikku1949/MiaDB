@@ -11,9 +11,9 @@ It is still under development, so you won't find all the features and there migh
 
 ## The development team
 
-> Developper : Sedorikku#0001
-> Tester : little evil thing#3621
-> Support : Flø#0001
+- Developper : Sedorikku#0001
+- Tester : little evil thing#3621
+- Support : Flø#0001
 
 This overlay will probably be offered in a hosting
 
