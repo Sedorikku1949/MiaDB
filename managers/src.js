@@ -1,8 +1,7 @@
 const raven = require("ravendb")
-const Err = require("./error")
 
 function getGoodKeyPath(str) {
-  return str.match(/(\[("|'|`))?\w+(("|'|`)\])?/gm).map(e => e.match(/\[.+\]/g) ? e.slice(2, e.length-2) : e );
+  return str.match(/(\[("|'|`))?(\w|\-|\/)+(("|'|`)\])?/gm).map(e => e.match(/\[.+\]/g) ? e.slice(2, e.length-2) : e );
 }
 
 function updateObj(obj, path, value) {
@@ -33,17 +32,30 @@ function calc(old, nb, opt){
   };
 };
 
-class MiaDB {
+class MiaDB extends Map {
   constructor(options = {}){
-      if (typeof options !== "object" || Array.isArray(options)) throw new Error("options must be an object", "options_type");
-      if (typeof options.url !== "string") throw new Error("options.url must be a string", "option_url_type");
-      if (typeof options.name !== "string") throw new Error("options.name must be a string", "option_name_type");
-      this.store = new raven.DocumentStore(options.url, options.name);
-      try { this.store.initialize() }
-        catch(err) {
-          this.store = null;
-          throw new Error("The connextion has failed !\nTry to start the database or change the link and name in options")
-        }
+    super();
+    if (typeof options !== "object" || Array.isArray(options)) throw new Error("options must be an object", "options_type");
+    if (typeof options.url !== "string") throw new Error("options.url must be a string", "option_url_type");
+    if (typeof options.name !== "string") throw new Error("options.name must be a string", "option_name_type");
+    this.createdTimestamp = Date.now();
+    this.url = options.url;
+    this.databaseName = options.name;
+    this.node = "A-001_&@-json.ravendb"
+    this.initialize = false;
+    this.online = true;
+    this.store = new raven.DocumentStore(options.url, options.name);
+    try {
+      this.store.initialize();
+      this.initialize = true;
+      const session = this.store.openSession();
+      session.query("from @all_docs").all().then(data => {
+        data.forEach((buff) => super.set(buff.id, buff.data));
+      });
+    } catch(err) {
+        this.store = null;
+        throw new Error("The connextion has failed !\nTry to start the database or change the link and name in options")
+      }
   };
 
   /**
@@ -59,17 +71,22 @@ class MiaDB {
     if (!this.store) throw new Error("An error as occured !");
     if (path && typeof path !== "string") throw new Error("invalid value was provided");
     let session = this.store.openSession();
-    if (await session.load(key)) { // already exist
-      let oldData = await session.load(key);
-      if (!path) oldData.data = data;
+    let oldData = await session.load(key)
+    if (oldData) { // already exist
+      if (!path) { oldData.data = data; await session.saveChanges(); }
       else { // access to the good path
-        try { oldData.data = updateObj(oldData.data, getGoodKeyPath(path), data); }
-          catch(err) { console.log(err); throw new Error("An invalid path was provided !") };
+        try {
+          oldData = updateObj(oldData, ["data", ...getGoodKeyPath(path)], data);
+          session.store(oldData, key);
+          super.set(key, oldData?.data);
+          await session.saveChanges();
+        } catch(err) { console.log(err); throw new Error("An invalid path was provided !") };
       };
     } else { // the key is create
       await session.store({ data: data }, key);
+      super.set(key,data.data);
+      await session.saveChanges();
     };
-    await session.saveChanges();
     return data;
   };
 
@@ -79,17 +96,16 @@ class MiaDB {
    * @param {*} path - the path in the key, it's optionnal
    * @returns {Boolean|*}
    */
-   async get(key, path = null) {
+   get(key, path = null) {
     if (typeof key !== "string") throw new Error("key is not optionnal !");
     if (!this.store) throw new Error("An error as occured !");
-    let session = this.store.openSession();
+    const load = super.get(key);
     try { 
-      if (!path || (path && typeof path !== "string")) return (await session.load(key))?.data;
-      let obj = (await session.load(key))?.data;
-      getGoodKeyPath(path).forEach(elm => obj = obj[elm]);
+      if (!path || (path && typeof path !== "string")) return load;
+      let obj = load;
+      try { getGoodKeyPath(path).forEach(elm => obj = obj[elm]); } catch(err) { return obj }
       return obj;
     } catch (err) {
-      console.error(err);
       return false;
     }
   };
@@ -124,8 +140,8 @@ class MiaDB {
   async has(key, path = null){
     if (!key || typeof key !== "string") throw new Error("key must be a string !");
     if (path && typeof path !== "string") throw new Error("path must be null or a string !");
-    const session = await this.store.openSession();
-    let data = (await session.load(key)).data;
+    const session = this.store.openSession();
+    let data = (await session.load(key))?.data;
     if (path) {
       // check if the key exist and if the path is good
       if (data) {
@@ -150,6 +166,7 @@ class MiaDB {
     const session = this.store.openSession();
     if ( !(await this.has(key)) ) return null;
     await session.delete(key);
+    super.delete(key);
     await session.saveChanges();
     return true;
   };
@@ -163,7 +180,7 @@ class MiaDB {
    async inc(key, path = null){
     if (path && typeof path !== "string") throw new Error("path must be a string or null");
     if (!key || typeof key !== "string") throw new Error("key must be a string");
-    const session = await this.store.openSession()
+    const session = this.store.openSession()
     if (path){
       let data = await session.load(key)
       if (!data) return false;
@@ -172,6 +189,7 @@ class MiaDB {
         ["data", ...getGoodKeyPath(path)].forEach(elm => oldData = oldData[elm]);
         oldData++
         data = updateObj(data, ["data", ...getGoodKeyPath(path)], oldData )
+        super.set(key,data.data);
         await session.saveChanges()
         return true;
       } catch(err) { return null; }
@@ -179,6 +197,7 @@ class MiaDB {
       let data = await session.load(key)
       if (!data) return false;
       data.data++
+      super.set(key,data.data);
       await session.saveChanges()
       return true;
     }
@@ -194,7 +213,7 @@ class MiaDB {
    async dec(key, path = null){
     if (path && typeof path !== "string") throw new Error("path must be a string or null");
     if (!key || typeof key !== "string") throw new Error("key must be a string");
-    const session = await this.store.openSession()
+    const session = this.store.openSession()
     if (path){
       let data = await session.load(key)
       if (!data) return false;
@@ -203,7 +222,8 @@ class MiaDB {
         ["data", ...getGoodKeyPath(path)].forEach(elm => oldData = oldData[elm]);
         if (isNaN(oldData)) return null;
         oldData--
-        data = updateObj(data, ["data", ...getGoodKeyPath(path)], oldData )
+        data = updateObj(data, ["data", ...getGoodKeyPath(path)], oldData );
+        super.set(key,data.data);
         await session.saveChanges()
         return true;
       } catch(err) { return null; }
@@ -212,6 +232,7 @@ class MiaDB {
       if (!data) return false;
       if (isNaN(data.data)) return null;
       data.data--
+      super.set(key,data.data);
       await session.saveChanges()
       return true;
     }
@@ -226,14 +247,13 @@ class MiaDB {
    async getPrimitive(key, path = null) {
     if (typeof key !== "string") throw new Error("key is not optionnal !");
     if (!this.store) throw new Error("An error as occured !");
-    let session = await this.store.openSession();
+    let session = this.store.openSession();
     try { 
       if (!path || (path && typeof path !== "string")) return (await session.load(key));
       let obj = (await session.load(key));
       getGoodKeyPath(path).forEach(elm => obj = obj[elm]);
       return obj;
     } catch (err) {
-      console.error(err);
       return false;
     }
   };
@@ -251,23 +271,26 @@ class MiaDB {
     if (typeof opt !== "string" || !["+","-","/","%","*", "**", "floor", "sqrt", "abs", "round", "trunc", "log", "cos", "tan", "sin"].includes(opt)) throw new Error("operator must be a string");
     if (isNaN(data)) throw new Error("data must be a number");
     if (path && typeof path !== "string") throw new Error("path must be a string");
-    const session = await this.store.openSession();
-    if ( !(await session.load(key)) ) return null;
+    const session = this.store.openSession();
+    const load = await session.load(key)
+    if ( !(load) ) return null;
     // path or not
     if (path){
       // path 
-      let oldData = await session.load(key);
-      let nb = (await session.load(key))?.data;
+      let oldData = load;
+      let nb = load?.data;
       getGoodKeyPath(path).forEach(elm => nb = nb[elm]);
       if (isNaN(nb)) return null;
       nb = calc(nb, data, opt);
       oldData = updateObj(oldData, ["data", ...getGoodKeyPath(path)], nb)
+      super.set(key, oldData?.data);
       await session.saveChanges()
       return true
     } else {
       // no path
-      let oldData = await session.load(key);
+      let oldData = load;
       oldData.data = calc(oldData.data, data, opt)
+      super.set(key, oldData?.data);
       await session.saveChanges()
       return true
     }
@@ -295,6 +318,7 @@ class MiaDB {
       if (!Array.isArray(oldArr)) return null;
       oldArr.splice(index, 0, data);
       oldData = updateObj(oldData, getGoodKeyPath(path), oldArr)
+      super.set(key, oldData?.data);
       await session.saveChanges()
       return true;
     } else {
@@ -302,6 +326,7 @@ class MiaDB {
       let oldData = await session.load(key);
       if (!Array.isArray(oldData.data)) return null;
       oldData["data"].splice(index, 0, data)
+      super.set(key, oldData?.data);
       await session.saveChanges()
       return true;
     }
@@ -324,6 +349,7 @@ class MiaDB {
       if (!Array.isArray(oldArr)) return null;
       oldArr.splice(index, deleteCount);
       oldData = updateObj(oldData, getGoodKeyPath(path), oldArr)
+      super.set(key, oldData?.data);
       await session.saveChanges()
       return true;
     } else {
@@ -331,11 +357,12 @@ class MiaDB {
       let oldData = await session.load(key);
       if (!Array.isArray(oldData.data)) return null;
       oldData["data"].splice(index, deleteCount)
+      super.set(key, oldData?.data);
       await session.saveChanges()
       return true;
     }
   }
-
 };
 
 module.exports = MiaDB;
+
