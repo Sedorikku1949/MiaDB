@@ -41,7 +41,6 @@ class MiaDB extends Map {
     this.createdTimestamp = Date.now();
     this.url = options.url;
     this.databaseName = options.name;
-    this.node = "A-001_&@-json.ravendb"
     this.initialize = false;
     this.online = true;
     this.store = new raven.DocumentStore(options.url, options.name);
